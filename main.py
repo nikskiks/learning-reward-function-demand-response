@@ -25,7 +25,7 @@ if __name__ == "__main__":
     if torch.cuda.is_available():
         num_episodes = EPISODES
     else:
-        num_episodes = 1
+        num_episodes = 3500
     
     
     data_frame = {}
