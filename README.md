@@ -5,7 +5,7 @@ This repository contains code for the paper:
 *Nikolina Čović, Jochen L. Cremer, and Hrvoje Pandžić "Learning a Reward Function for User-Preferred Appliance Scheduling", submitted to PSCC 2024.
 
 ## Data
-This repository does not include files with data. The full data that was used in the case studies in our paper can be downloaded from “Pecan Street Inc.” [Online]. Available: https://www.pecanstreet.org/
+This repository includes only exemplary files in data/. The full data that was used in the case studies in our paper can be downloaded from “Pecan Street Inc.” [Online]. Available: https://www.pecanstreet.org/
 
 ## License
    
