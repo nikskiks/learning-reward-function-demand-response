@@ -1,409 +1,402 @@
-import datetime
-import os
-import time
-import matplotlib.pyplot as plt
+import torch
 import numpy as np
-import tensorflow as tf
-import matplotlib.dates as mdates
-from matplotlib import ticker
 
-from agents.agent_aggregator_dqn import AggregatorAgent
-from agents.agent_customer import CustomerAgent, construct_network
+from training import train_function
+from testing import test_function
+from agents.agent_customer import CustomerAgent
 from environment.environment import Environment
-from params import EPISODES, TIME_STEPS_TEST, TRAINING_START_DAY, NUM_RL_AGENTS, \
-    AGENT_IDS, TIME_STEPS_TRAIN, TRAINING_PERIOD, TRAINING_END_DAY, AGENT_CLASS, CLASS_RHO, CLASS_DC, \
-    DISSATISFACTION_COEFFICIENTS, REPLACE_TARGET_INTERVAL, TESTING_START_DAY, TESTING_END_DAY, BASELINE_START_DAY, \
-    TESTING_PERIOD
+from params import EPISODES, NUM_RL_AGENTS, AGENT_IDS, PRICES
+from irl.irl import optimizing
+from utils.value_optimal import value_optimal
 
-env = Environment(AGENT_IDS, heterogeneous=False, baseline=False)
-aggregator_agent = AggregatorAgent(env)
-customer_agents = [CustomerAgent(agent_id, data_id, env, dummy=agent_id >= NUM_RL_AGENTS) for agent_id, data_id in enumerate(AGENT_IDS)]
+import matplotlib.pyplot as plt
 
-
-def main():
-    train(log=True, save=True)
-    test_single_day(path=None, day=182)
-    # test_single_day(path='save_files/MARL_IDR_2', day=182)
-    # test_average(path='save_files/X2_a')
-    # for day in range(181, 243):
-    #     test_single_day(path='save_files/Case_1_b', day=day)
+from sklearn.metrics import mean_absolute_error
+from sklearn.metrics import mean_squared_error
+from scipy import stats
+import pandas as pd
+import seaborn as sns
+# from memory_profiler import profile
 
 
-def train(log, save):
-    # Use TensorBoard for the learning curves
-    current_time = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    start = time.time()
-    # log_name = 'no_baseline_' + current_time
-    log_name = 'MARL_IDR_6'
-    if log:
-        log_path = os.path.join('logs', log_name)
-        tf_writer = tf.summary.create_file_writer(log_path)
-
-    # Train with trained customer agents
-    # for agent in customer_agents:
-    #     agent.load('save_files/Case_2_b')
-
-    # Train with trained aggregator
-    # aggregator_agent.load('save_files/K8')
-
-    aggregator_turn = True
-
-    for episode in range(EPISODES):
-        start_episode = time.time()
-
-        # Reset environment and agents
-        env.reset(max_steps=TIME_STEPS_TRAIN)
-        aggregator_agent.reset()
-        for agent in customer_agents:
-            agent.reset()
-
-        if episode % REPLACE_TARGET_INTERVAL == 0:
-            aggregator_turn = False if aggregator_turn else True
-
-        # Train single episode
-        while not env.done:
-            aggregator_agent.act(train=True)
-            # aggregator_agent.act(train=True) if aggregator_turn else aggregator_agent.act(train=False)
-            for agent in customer_agents:
-                agent.act(train=True)
-                # agent.act(train=False) if aggregator_turn else agent.act(train=True)
-            env.step()
-
-        if episode % 1 == 0:
-            print('Episode:', episode)
-            print('Aggregator turn:', aggregator_turn)
-            print('Day:', datetime.datetime.strptime('{} {}'.format(env.day, 2018), '%j %Y'))
-            print('Episode run time:', (time.time() - start_episode), 'sec')
-            print('Cumulated run time:', (time.time() - start), 'sec')
-
-        if log:
-            with tf_writer.as_default():
-                tf.summary.scalar("epsilon/agent_{}".format(customer_agents[0].data_id), customer_agents[0].epsilon, episode)
-                tf.summary.scalar("reward/agent_{}".format(customer_agents[0].data_id), customer_agents[0].acc_reward, episode)
-                tf.summary.scalar("reward/agent_{}".format(customer_agents[8].data_id), customer_agents[8].acc_reward, episode)
-                tf.summary.scalar("reward/agent_{}".format(customer_agents[17].data_id), customer_agents[17].acc_reward, episode)
-                tf.summary.scalar("reward/aggregator", aggregator_agent.acc_reward, episode)
-                tf.summary.scalar("epsilon/aggregator", aggregator_agent.epsilon, episode)
-
+if __name__ == "__main__":
+    
+    # If training on GPU use EPISODES number of episodes for training, instead reduce to 2000
+    if torch.cuda.is_available():
+        num_episodes = EPISODES
+    else:
+        num_episodes = 1
+    
+    
+    data_frame = {}
+    # True for training
+    TRAIN_PHASE = 1
+    # Save training values (rewards and their plots)
+    LOG_VAL = 1
     # Save trained networks
-    if save:
-        path = 'save_files/' + log_name
-        os.mkdir(path)
-        aggregator_agent.save(path)
-        for agent in customer_agents:
-            agent.save(path)
+    SAVE_NET = 1
+    # True for testing
+    TEST_PHASE = 1
+    # Define the start and the end of testing period, available days [182,213]
+    START_TEST_DAY = 182 #182
+    END_TEST_DAY = 213 #213
+    # Try to recover the reward function 
+    IRL = 1
+    # Finding basic Q networks - optimal and first (random)
+    OPTI = 1
+    FIRST = 0
+    # Define the number of household for which to do the plotting
+    PLOT_AGENT = 1
+    # Define whether to plot or not
+    PLOT_TEST = 0
+    # Plot graphs with incentives on it or not
+    PLOT_INCENTIVE = True
+    # Export test data to Excel file
+    EXPORT_TO_XLSX = True
+    # Policy path extension
+    EXT = [
+        "opt", 
+        "1.0"
+    ]
+    # Path for saving trained networks
+    save_path = 'Enter path for saving files'
+    cus_a = {}
+    env = Environment(AGENT_IDS, heterogeneous=False, baseline=False)
+    Vses= {}
+        
+        
+    if TRAIN_PHASE and OPTI:
+        alphas = None
+        rand = 0
+        exten = EXT[0]
+        
+        cus_a[exten] = [
+            CustomerAgent(agent_id, data_id, env, dummy=agent_id >= NUM_RL_AGENTS) 
+            for agent_id, data_id in enumerate(AGENT_IDS)
+        ]
+        
+        trs = train_function(
+            env, 
+            cus_a[exten], 
+            num_episodes, 
+            save_path, 
+            log=LOG_VAL, 
+            save=SAVE_NET,
+            alphas=alphas,
+            ext=exten,
+            irl_train=0, 
+            rand = rand
+        )
+        
+        # optimal = EXT[0]
+    if TEST_PHASE:
+        print('Optimal with TRUE reward:')
+        ch_opti, ini_opti, pc_opti, ar_opti = test_function(
+            env,  
+            cus_a[exten], 
+            save_path, 
+            plot_test=PLOT_TEST, 
+            plot_agent=PLOT_AGENT-1, 
+            plot_incentive=PLOT_INCENTIVE, 
+            export = EXPORT_TO_XLSX,
+            start_day=START_TEST_DAY, 
+            end_day=END_TEST_DAY,
+            alphas=None,
+            ext=exten,
+            irl=False, 
+            o=True
+        )
+        
+    OPTI = 0
+    FIRST = 1
+    rand = 1
+    
+    save_path = 'Enter path for saving files'
+    
+    if TRAIN_PHASE and FIRST:
+        exten = EXT[1]
+        
+        cus_a[exten] = [
+            CustomerAgent(agent_id, data_id, env, dummy=agent_id >= NUM_RL_AGENTS) 
+            for agent_id, data_id in enumerate(AGENT_IDS)
+        ]
+        
+        trs_first = train_function(
+            env, 
+            cus_a[exten], 
+            num_episodes, 
+            save_path, 
+            log=LOG_VAL, 
+            save=SAVE_NET,
+            alphas=alphas,
+            ext=exten,
+            irl_train=0, 
+            rand = rand,
+        )
+        
+    FIRST = 0 
+    vs_ext = []
+                
+    rewards = []
+    # Path for saving trained networks
+    save_path = 'Enter path for saving files'
+    
+    print("Calculating V_opti")
+    vs_opti = value_optimal(env, cus_a[EXT[0]], trs)
+    
+    vs_ext.append(vs_opti)
+    
+    print("Calculating V_first")
+    vs_first = value_optimal(env, cus_a[EXT[1]], trs_first)
+    vs_ext.append(vs_first)
+    
+    keys = list(vs_ext[0][0].keys())
+    d = len(vs_ext[0][0][keys[0]][0])
 
-    print('Training done')
-    print()
+    cnt = 0
+    aps = []
+    aps_val = []
+    conss = []
+    acc = []
+    peakk = []
+    reww = []
+    
+    # vs0 = []
+    # vss = []
+    if TRAIN_PHASE and not (OPTI or FIRST) and IRL:
+        while cnt < 10:
+            alphas = np.array(optimizing(vs_ext[0], vs_ext[1:], d))
+            aps.append(alphas.sum())
+            aps_val.append(alphas)
+            print('Alphas', alphas)
+            
+            # # For only 1 state
+            # s = list(vs_ext[0][0].keys())[0] #21.22 je za day 92
+            # vs0.append((vs_ext[0][0][s][0]*alphas.reshape((-1,1))).sum())
+            # vss.append((vs_ext[-1][0][s][0]*alphas.reshape((-1,1))).sum())
+            # plt.figure(1)
+            # plt.plot(vs0, label='opt')
+            # plt.plot(vss, label='vss')
+            # plt.legend()
+            # plt.title('V(21.22)') #21.48 je za 131
+            # plt.show()
+            
+            cus_a[str(100+cnt)] = [
+                CustomerAgent(agent_id, data_id, env, dummy=agent_id >= NUM_RL_AGENTS) 
+                for agent_id, data_id in enumerate(AGENT_IDS)
+            ]
+            
+            vs_k = train_function(
+                env, 
+                cus_a[str(100+cnt)],
+                num_episodes, 
+                save_path, 
+                log=LOG_VAL, 
+                save=SAVE_NET,
+                alphas=alphas,
+                ext=(100+cnt),
+                irl_train=IRL,
+            )
+            
+            vs_ext.append(vs_k)
+            EXT.append(str(100+cnt))
 
+            print('Last with TRUE reward:')
+            ch_latr, ini_latr, pc_latr, ar_fit = test_function(
+                env, 
+                cus_a[str(100+cnt)], 
+                save_path, 
+                plot_test=PLOT_TEST,
+                plot_agent=PLOT_AGENT-1, 
+                plot_incentive=PLOT_INCENTIVE, 
+                export = EXPORT_TO_XLSX,
+                start_day=START_TEST_DAY, 
+                end_day=END_TEST_DAY,
+                alphas=None,
+                ext=str(100+cnt),
+                irl=False,
+                o=False
+            )
+            
+            reww.append(np.mean(ar_fit))
+            conss = env.consumptions
+            acc = env.actions
+           
+            # plt.figure(2)
+            # plt.title('Rews per iteration')
+            # plt.plot(reww, label='f')
+            # plt.plot(np.ones((len(reww), 1))*np.mean(ar_opti), label='o')
+            # plt.legend()
+            # plt.show()
+            
+            plt.figure(3)
+            plt.plot(aps, 'o-')
+            plt.grid()
+            plt.show()
+            cnt += 1
 
-def test_single_day(path, day=TRAINING_START_DAY):
-    env.reset(day=day, max_steps=TIME_STEPS_TEST)
+    #Rewards plot test
+    plt.rcParams["figure.figsize"] = (11,6)
+    plt.ylabel('Reward', fontsize=18)
+    plt.xlabel('Iteration', fontsize=18)
+    plt.xticks(np.arange(0, len(reww),2), np.arange(1, len(reww)+1, 2), fontsize=12)
+    plt.yticks(fontsize=12)
+    plt.plot(np.mean(ar_opti)*np.ones(len(reww),), label="optimal", color='blue')
+    plt.plot(reww, 'o-', label="learned", color='green')
+    plt.legend(fontsize=15)
+    plt.grid()
+    plt.savefig('Enter path for saving files', bbox_inches = 'tight')
+    plt.show()
+    
+    plt.rcParams["figure.figsize"] = (11,6)
+    plt.plot(aps, 'o-')
+    plt.ylabel("Sum of alphas", fontsize=18)
+    plt.xlabel("Iteration", fontsize=18)
+    plt.xticks(np.arange(0, len(reww),2), np.arange(1, len(reww)+1, 2), fontsize=12)
+    plt.yticks(fontsize=12)
+    plt.grid()
+    plt.savefig('Enter path for saving files', bbox_inches = 'tight')
+    plt.show()
+            
+    if TEST_PHASE:
+        
+        rangg = np.arange(182, 213) 
+        
+        # Define whether to plot or not
+        PLOT_TEST = 0
+        
+        maesD = []
+        msesD = []
+        pearsD = []
+    
+        for dayyy in rangg:
+            
+            
+            START_TEST_DAY = dayyy #92
+            END_TEST_DAY = dayyy + 1 #93
+            save_path_opti = 'Enter path for saving files'
+            print('Optimal with TRUE reward:')
+            ch_opti, ini_opti, pc_opti, ar_opti = test_function(
+                env, 
+                cus_a[EXT[0]], 
+                save_path_opti, 
+                plot_test=PLOT_TEST, 
+                plot_agent=PLOT_AGENT-1, 
+                plot_incentive=PLOT_INCENTIVE, 
+                export = EXPORT_TO_XLSX,
+                start_day=START_TEST_DAY, 
+                end_day=END_TEST_DAY,
+                alphas=None,
+                ext=EXT[0],
+                irl=False,
+                o=True
+            )
+            
+            optimal_cons = env.consumptions
+            optimal_actions = env.actions
+              
+            print('Last with TRUE reward:')
+            ch_latr, ini_latr, pc_latr, ar_fit = test_function(
+                env, 
+                cus_a[EXT[-1]], 
+                save_path, 
+                plot_test=PLOT_TEST,
+                plot_agent=PLOT_AGENT-1, 
+                plot_incentive=PLOT_INCENTIVE, 
+                export = EXPORT_TO_XLSX,
+                start_day=START_TEST_DAY, 
+                end_day=END_TEST_DAY,
+                alphas=None,
+                ext=EXT[-2],
+                irl=False,
+                o=False
+            )
+            
+            conss = env.consumptions
+            acc = env.actions
+            
+    
+            for i in range(0, len(ch_opti)):
+                for household in range(0, ch_opti[i].shape[1]):
+                    plt.rcParams["figure.figsize"] = (11,6)
+                    plt.figure(household)
+                    # plt.title(f"Fig {household+1}")
+                    plt.plot(ch_opti[i][:, household], '*-', label='optimal', color="blue")
+                    plt.plot(ch_latr[i][:, household], 'o-', label='learned', color="green")
+                    plt.ylabel('Consumption change (kW)', fontsize=18)
+                    plt.xlabel('15-minute periods', fontsize=18)
+                    plt.xticks(np.arange(0,96,15), np.arange(1,97,15), fontsize=12)
+                    plt.yticks(fontsize=12)
+                    plt.legend(fontsize=15)
+                    plt.grid()
+                    
+                    path = (
+                        'Enter path for saving files'
+                        )
+                    plt.savefig(path, bbox_inches = 'tight')
+                    plt.show()
+            
 
-    # Load agents
-    if path is not None:
-        aggregator_agent.load(path)
-        for agent in customer_agents:
-            agent.load(path)
+            
+            perc = []
+            for a in range(0, len(ch_opti)):
+                for household in range(0, ch_opti[a].shape[1]):
+                    print('Household:', household)
+                    maxi_val = 0
+                    if (max(abs(ch_opti[0][:,household])) > maxi_val):
+                        maxi_val = max(ch_opti[0][:,household])
+                    if (max(abs(ch_latr[0][:,household])) > maxi_val):
+                        maxi_val = max(ch_latr[0][:,household])
+                    br = 0
+                    ba  = 0
+                    for ee in range(0, ch_opti[a].shape[0]):
+                        if not(ch_opti[a][ee, household] == 0 and ch_latr[a][ee, household] == 0):
+                            if abs(ch_opti[a][ee, household] - ch_latr[a][ee, household]) > 0:
+                                br += 1
+                            else:
+                                ba += 1
+                    if br+ba>0:
+                        print('Razlika u %d je %f posto slucajeva.' %(a+1, 100*br/(br+ba)))
+                        perc.append(100*br/(br+ba))
+            
+            maes = []
+            mses = []
+            pears = []
+            for a in range(0, len(ch_opti)):
+                for household in range(0, ch_opti[a].shape[1]):
+                    print('Household:', household)
+                    maxi_val = 0
+                    if (max(abs(ch_opti[0][:,household])) > maxi_val):
+                        maxi_val = max(ch_opti[0][:,household])
+                    if (max(abs(ch_latr[0][:,household])) > maxi_val):
+                        maxi_val = max(ch_latr[0][:,household])
+                    if maxi_val != 0:
+                        maes.append(mean_absolute_error(ch_opti[0][:,household]/maxi_val, ch_latr[0][:,household]/maxi_val))
+                        mses.append(mean_squared_error(ch_opti[0][:,household]/maxi_val, ch_latr[0][:,household]/maxi_val))
+                        pears.append(stats.pearsonr((ch_opti[0][:,household]/maxi_val).reshape((-1,)), (ch_latr[0][:,household]/maxi_val).reshape((-1,))))
+                    else:
+                        maes.append(0.)
+                        mses.append(0.)
+                        pears.append(0.)
+            maesD.append(maes)
+            msesD.append(mses)
+            pearsD.append(pears)
 
-    # Run single day
-    start = time.time()
-    for iteration in range(TIME_STEPS_TEST):
-        aggregator_agent.act(train=False)
-        for agent in customer_agents:
-            agent.act(train=False)
-        env.step()
-    end = time.time()
-
-    plot_agent = customer_agents[0]
-    plot_hourly_average = False  # Average demands, consumptions and incentives per hour to make the plot more readable
-    plot_incentive = True  # Plot the incentive
-    time_labels = [datetime.datetime(year=2018, month=1, day=1) + datetime.timedelta(days=day - 1, minutes=i * 15) for i in range(TIME_STEPS_TEST)]
-
-    print_metrics(end - start, path)
-    for plot_agent in customer_agents:
-        plot_aggregated_load_curve(time_labels, day, path)
-        plot_single_load_curve(plot_agent, time_labels, day, path)
-        plot_ac_reduction(plot_agent, time_labels, path, plot_incentive)
-        plot_dissatisfaction(plot_agent, time_labels, path, plot_incentive)
-        plot_schedule(plot_agent, time_labels, path)
-        plt.show()
-
-
-def test_average(path):
-    agents_rewards = np.zeros((TESTING_PERIOD, NUM_RL_AGENTS))
-    incentives_received = np.zeros((TESTING_PERIOD, NUM_RL_AGENTS))
-    aggregator_rewards = np.zeros(TESTING_PERIOD)
-    total_demands = np.zeros((TESTING_PERIOD, TIME_STEPS_TEST))
-    total_consumptions = np.zeros((TESTING_PERIOD, TIME_STEPS_TEST))
-    peak_demand = np.zeros(TESTING_PERIOD)
-    peak_consumption = np.zeros(TESTING_PERIOD)
-    mean_demand = np.zeros(TESTING_PERIOD)
-    mean_consumption = np.zeros(TESTING_PERIOD)
-    thresholds = np.zeros(TESTING_PERIOD)
-    runtime = np.zeros(TESTING_PERIOD)
-
-    for day in range(TESTING_START_DAY, TESTING_END_DAY):
-        print('Test on', datetime.datetime.strptime('{} {}'.format(day, 2018), '%j %Y'))
-        env.reset(day=day, max_steps=TIME_STEPS_TEST)
-
-        # Load agents
-        if path is not None:
-            aggregator_agent.load(path)
-            for agent in customer_agents:
-                agent.load(path)
-
-        # Run single day
-        start = time.time()
-        for iteration in range(TIME_STEPS_TEST):
-            aggregator_agent.act(train=False)
-            for agent in customer_agents:
-                agent.act(train=False)
-            env.step()
-        end = time.time()
-
-        agents_rewards[day - TESTING_START_DAY] = env.rewards_customers.sum(axis=0)[:NUM_RL_AGENTS]
-        aggregator_rewards[day - TESTING_START_DAY] = env.rewards_aggregator.sum()
-        incentives_received[day - TESTING_START_DAY] = env.incentive_received.sum(axis=0)[:NUM_RL_AGENTS]
-        total_demands[day - TESTING_START_DAY] = env.get_total_demand()
-        total_consumptions[day - TESTING_START_DAY] = env.get_total_consumption()
-        peak_demand[day - TESTING_START_DAY] = np.max(env.get_total_demand())
-        peak_consumption[day - TESTING_START_DAY] = np.max(env.get_total_consumption())
-        mean_demand[day - TESTING_START_DAY] = np.mean(env.get_total_demand())
-        mean_consumption[day - TESTING_START_DAY] = np.mean(env.get_total_consumption())
-        thresholds[day - TESTING_START_DAY] = env.capacity_threshold
-        runtime[day - TESTING_END_DAY] = end - start
-
-    print('Path:', str(path))
-    print('Test period', datetime.datetime.strptime('{} {}'.format(TESTING_START_DAY, 2018), '%j %Y'),
-          datetime.datetime.strptime('{} {}'.format(TESTING_END_DAY, 2018), '%j %Y'))
-    print('Mean run time:', np.mean(runtime))
-    print('Mean customer reward:', np.mean(agents_rewards))
-    print('Mean customer reward per agent:', np.mean(agents_rewards, axis=0))
-    print('Mean customer reward per day:', np.mean(agents_rewards, axis=1))
-    print('Mean aggregator reward per day:', np.mean(aggregator_rewards))
-    print()
-    print('Metrics averaged over testing period', '  No DR', '   with DR')
-    print('Peak load:', np.mean(peak_demand), np.mean(peak_consumption))
-    print('Mean load:', np.mean(mean_demand), np.mean(mean_consumption))
-    print('PAR:', np.mean(peak_demand) / np.mean(mean_demand), np.mean(peak_consumption) / np.mean(mean_consumption))
-    print('Mean incentive paid:', '0', np.mean(np.sum(incentives_received, axis=1)))
-    print('Mean incentive received per agent:', '0', np.mean(incentives_received))
-    print('Mean threshold exceedance:',
-          np.mean(np.sum(np.maximum(0, total_demands - thresholds[:, None]), axis=1)),
-          np.mean(np.sum(np.maximum(0, total_consumptions - thresholds[:, None]), axis=1)))
-
-
-def print_metrics(run_time, path):
-    agents_rewards = env.rewards_customers.sum(axis=0)[:NUM_RL_AGENTS]
-    incentives_received = env.incentive_received.sum(axis=0)[:NUM_RL_AGENTS]
-    test_day = datetime.datetime.strptime('{} {}'.format(env.day, 2018), '%j %Y')
-    peak_demand = np.max(env.get_total_demand())
-    peak_consumption = np.max(env.get_total_consumption())
-    mean_demand = np.mean(env.get_total_demand())
-    mean_consumption = np.mean(env.get_total_consumption())
-    print('Path:', str(path))
-    print('Test on', test_day)
-    print('Run time:', run_time, 'sec')
-    print('Customer agent rewards:', agents_rewards)
-    print('Mean customer agent reward:', np.mean(agents_rewards))
-    print('Aggregator agent reward:', env.rewards_aggregator.sum())
-    print('Metrics', '  No DR', '   with DR')
-    print('Peak load:', peak_demand, peak_consumption)
-    print('Mean load:', mean_demand, mean_consumption)
-    print('Std:', np.std(env.get_total_demand()), np.std(env.get_total_consumption()))
-    print('PAR:', peak_demand / mean_demand, peak_consumption / mean_consumption)
-    print('Total incentive paid:', '0', np.sum(incentives_received))
-    print('Mean incentive received:', '0', np.mean(incentives_received))
-    print('Threshold exceedance:',
-          np.sum(np.maximum(0, env.get_total_demand() - env.capacity_threshold)),
-          np.sum(np.maximum(0, env.get_total_consumption() - env.capacity_threshold)))
-
-    print('Demand:', repr(env.get_total_demand()))
-    print('Load curve:', repr(env.get_total_consumption()))
-    print('Incentives:', repr(env.incentives))
-    print('Capacity:', env.capacity_threshold)
-
-
-def plot_aggregated_load_curve(time_labels, day, path):
-    ax, ax2 = init_plot()
-    # ax = init_plot(twinx=False)
-
-    ax.hlines(env.capacity_threshold, time_labels[0], time_labels[-1], label='Capacity', colors='black', linestyles='dashed', linewidth=3, alpha=0.8)
-    # ax.fill_between(time_labels, env.non_shiftable_load.sum(axis=1), label='Non-shiftable demand', color='orange')
-    ax.plot(time_labels, env.get_total_demand(), label='Without DR', color='C1', linestyle='dashed', linewidth=3)
-    # ax.plot(time_labels, env.baselines[:, day - TRAINING_START_DAY, :TIME_STEPS_TEST].sum(axis=0), label='Baseline', color='C3', linestyle='dashed', linewidth=3)
-    ax.fill_between(time_labels, env.get_total_consumption(), label='With DR', color='C1', alpha=0.5)
-    ax2.plot(time_labels, env.incentives, label='Incentive', color='C2', marker='x', markersize=8, linewidth=3, markeredgewidth=3)
-    # ax.bar(time_labels, env.incentives, width=1/len(time_labels[48:]), label='Incentive', color='black')
-
-    # Labels
-    # ax.yaxis.set_major_locator(ticker.MultipleLocator(1))
-    ax.tick_params(axis='both', which='both', labelsize=18)
-    ax2.tick_params(axis='both', which='both', labelsize=18)
-    ax.set_xlim(time_labels[47], time_labels[-1])
-    ax2.set_xlim(time_labels[47], time_labels[-1])
-    ax.set_ylim(bottom=40)
-    # ax.set_ylim(bottom=0, top=10)
-    ax2.set_ylim(bottom=0, top=10)
-    ax.set_ylabel('Aggregated consumption (kW)', fontsize=20)
-    ax.set_ylabel('Incentive (¢)', fontsize=20)
-    ax.legend(loc='upper left', fontsize=20)
-    ax2.legend(loc='upper right', fontsize=20)
-    ax.set_xlabel('Time (h)', fontsize=20)
-    ax.grid(which='major', linewidth=1)
-    ax.grid(which='minor', linewidth=0.5)
-    plt.title('Load curve' + '\n' + str(path))
+            data_frame = pd.DataFrame({'MAE':maesD, 'MSE':msesD, 'Pear':pearsD})
+            
+    print('Writing in xlsx..')
+    with pd.ExcelWriter('Enter path for saving files'') as writer:
+        data_frame.to_excel(writer, sheet_name='results', index=False)
+    
+    # # DAYS HOUSEHOLDS
+    # plt.figure(figsize=(11, 6))
+    # dff = pd.DataFrame(maesD, columns=[f'Household {d}' for d in np.arange(1,26)])
+    # plt.figure(figsize=(13,10), dpi= 80)
+    # sns.boxplot(data=dff, notch=False)
+    # plt.xticks(np.arange(0,25,1), np.arange(1,26,1), fontsize=12)
+    # plt.yticks(fontsize=12)
+    # plt.xlabel("Household no.", fontsize=18)
+    # # plt.title('MAE', fontsize=22)
+    # save_path = 'Enter path for saving files'
+    # plt.savefig(save_path, bbox_inches = 'tight')
     # plt.show()
-
-
-def plot_single_load_curve(plot_agent, time_labels, day, path):
-    ax = init_plot(twinx=False)
-
-    baseline = env.baselines[plot_agent.agent_id, day - BASELINE_START_DAY, :][:TIME_STEPS_TEST]
-
-    # ax.fill_between(time_labels, env.non_shiftable_load[:, plot_agent.agent_id], label='Agent {} non-shiftable'.format(plot_agent.data_id), color='C0')
-    ax.plot(time_labels, env.demand[:, plot_agent.agent_id], label='Without DR', color='C0', marker='o', markersize=8, linewidth=3)
-    ax.plot(time_labels, env.consumptions[:, plot_agent.agent_id], label='MARL-DR', color='C3', marker='^', markersize=8, linewidth=3, alpha=1)
-    ax.plot(time_labels, baseline, label='Baseline', color='black', linestyle='dashed', linewidth=3)
-    ax.plot(time_labels, env.incentives, label='Incentive', color='C2', marker='x', markersize=8)
-    # print('Incenties:', repr(env.incentives))
-
-    # Labels
-    ax.tick_params(axis='both', which='both', labelsize=20)
-    ax.set_xlim(time_labels[48], time_labels[-1])
-    # ax2.set_xlim(time_labels[47], time_labels[-1])
-    ax.set_ylim(bottom=0)
-    # ax2.set_ylim(bottom=0)
-    ax.set_ylabel('Power (kW)', fontsize=32)
-    # ax2.set_ylabel('Incentive (¢)')
-    ax.legend(loc='upper left', fontsize=20)
-    # ax2.legend(loc='upper right')
-    ax.set_xlabel('Time (h)', fontsize=32)
-    ax.grid(which='major', linewidth=1)
-    # ax.grid(which='minor', linewidth=0.5)
-    # plt.title('Load curve' + '\n' + str(path))
-    # plt.show()
-
-
-def plot_ac_reduction(plot_agent, time_labels, path, plot_incentive):
-    ax, ax2 = init_plot()
-
-    ac_demand = env.request_loads[:, plot_agent.agent_id, 0]
-    ac_consumption = env.ac_rates[:, plot_agent.agent_id] * env.request_loads[:, plot_agent.agent_id, 0]
-
-    ax.plot(time_labels, ac_demand, label='Agent {} AC original'.format(plot_agent.data_id), color='C0', alpha=0.5)
-    ax.plot(time_labels, ac_consumption, label='Agent {} AC actual'.format(plot_agent.data_id), linestyle='dashed', color='C0', alpha=0.5)
-    ax.fill_between(time_labels, env.ac_rates[:, plot_agent.agent_id] * env.request_loads[:, plot_agent.agent_id, 0], color='C0', alpha=0.2)
-    ax2.plot(time_labels, env.ac_rates[:, plot_agent.agent_id] * 10, label='Agent {} AC rate'.format(plot_agent.data_id), color='C1', alpha=0.5)
-
-    if plot_incentive:
-        ax2.plot(time_labels, env.incentives, label='Incentive', color='C2', alpha=1.0)
-
-    # Labels
-    ax.tick_params(axis='x', which='both', rotation=45)
-    ax.set_xlim(time_labels[0], time_labels[-1])
-    ax2.set_xlim(time_labels[0], time_labels[-1])
-    ax.set_ylim(bottom=0)
-    ax2.set_ylim(bottom=0)
-    ax.set_ylabel('Total demand (kW)')
-    ax2.set_ylabel('Incentive (¢)')
-    ax.legend(loc='upper left')
-    ax2.legend(loc='upper right')
-    ax.set_xlabel('Time')
-    ax.grid(which='major', linewidth=1)
-    ax.grid(which='minor', linewidth=0.5)
-    plt.title('Load curve' + '\n' + str(path))
-    # plt.show()
-
-
-def plot_dissatisfaction(plot_agent, time_labels, path, plot_incentive):
-    # ax, ax2 = init_plot()
-    ax = init_plot(twinx=False)
-    a, b, c, d, e = -env.dissatisfaction[:, plot_agent.agent_id, :].T
-    rewards = np.roll(env.rewards_customers[:, plot_agent.agent_id], -1)
-    rewards[-1] = 0
-
-    ax.stackplot(time_labels, b, c, d, e, a, labels=['EV', 'WM', 'DW', 'Dryer', 'AC'])
-    ax.plot(time_labels, env.incentive_received[:, plot_agent.agent_id], label='Profit', color='black', marker='s', markersize=8, linewidth=3)
-    ax.plot(time_labels, env.rewards_customers[:, plot_agent.agent_id], label='Total reward', color='C2', marker='o', markersize=8, linewidth=3)
-
-    # Labels
-    ax.tick_params(axis='both', which='both', labelsize=20)
-    # ax2.tick_params(axis='both', which='both', labelsize=14)
-    ax.set_xlim(time_labels[48], time_labels[-1])
-    # ax.set_ylim(bottom=0, top=15)
-    ax.set_ylabel('Reward', fontsize=32)
-    ax.legend(loc='upper left', fontsize=20)
-    ax.set_xlabel('Time (h)', fontsize=32)
-    ax.grid(which='major', linewidth=1)
-    # ax.grid(which='minor', linewidth=0.5)
-    # plt.title('Dissatisfaction' + '\n' + str(path))
-    # plt.show()
-
-
-def plot_schedule(plot_agent, time_labels, path):
-    # ax, ax2 = init_plot()
-    ax = init_plot(twinx=False)
-
-    requests = env.requests_new[:, plot_agent.agent_id][:TIME_STEPS_TRAIN]
-    actions = env.request_actions[:, plot_agent.agent_id][:TIME_STEPS_TRAIN]
-    time_labels = time_labels[:TIME_STEPS_TRAIN]
-    incentives = env.incentives[:TIME_STEPS_TRAIN]
-    power_rates = env.power_rates[:, plot_agent.agent_id][:TIME_STEPS_TRAIN]
-    ac_rates = env.ac_rates[:, plot_agent.agent_id][:TIME_STEPS_TRAIN]
-
-    # Uncomment for hourly average incentives
-    # incentives = np.mean(incentives.reshape(-1, 4), axis=1)
-
-    for i, (time_label, req, act) in enumerate(zip(time_labels, requests, actions)):
-        for j, (dev_name, dev_color, dev_req, dev_act) in enumerate(zip(['AC', 'EV', 'WM', 'DW', 'Dryer'], ['C4', 'C0', 'C1', 'C2', 'C3'], req, act)):
-            height = 0.4
-            request_bar = ax.barh(y=j + height, height=height, width=dev_req / 96, left=time_label, label=dev_name + ' original', color=dev_color, alpha=0.5, align='edge')
-            if j == 0:
-                height *= ac_rates[i]
-            action_bar = ax.barh(y=dev_name, height=height, width=dev_act / 96, left=time_label, label=dev_name, color=dev_color, align='edge')
-
-    # incentive_bar = ax.bar(time_labels, incentives, width=1 / 96, label='Incentive', align='edge', color='C1', alpha=0.4)
-    # power_rate_bar = ax2.plot(time_labels, power_rates * 10, label='Power rates', color='C2')
-
-    ax.tick_params(axis='both', which='both', labelsize=20)
-    # ax2.tick_params(axis='both', which='both', labelsize=14)
-    ax.set_xlim(time_labels[47], time_labels[-1])
-    # ax2.set_xlim(time_labels[47], time_labels[-1])
-    ax.set_ylim(bottom=0)
-    # ax2.set_ylim(bottom=0)
-    ax.grid(which='major', linewidth=1)
-    # ax.grid(which='minor', linewidth=0.5)
-    # ax.legend([request_bar, action_bar], ['Appliance requested', 'Appliance scheduled'], loc='upper left', fontsize=20)
-    # ax2.legend([incentive_bar], ['Incentive'], loc='upper right', fontsize=16)
-    # ax2.set_ylabel('Incentive (¢)', fontsize=16)
-    ax.set_xlabel('Time (h)', fontsize=32)
-    plt.setp(ax.get_yticklabels(), rotation=90, va="bottom", fontsize=20)
-    # plt.title('Load schedule agent ' + str(plot_agent.data_id) + '\n' + str(path))
-    # plt.show()
-
-
-def init_plot(twinx=True):
-    fig, ax = plt.subplots()
-
-    day_locator = mdates.DayLocator()
-    hour_locator = mdates.HourLocator(interval=1)
-    minute_locator = mdates.MinuteLocator(interval=15)
-    ax.xaxis.set_major_locator(hour_locator)
-    ax.xaxis.set_minor_locator(minute_locator)
-    ax.xaxis.set_major_formatter(mdates.DateFormatter('%H'))
-    # ax.xaxis.set_minor_formatter(mdates.DateFormatter('%H:%M'))
-
-    if twinx:
-        ax2 = ax.twinx()
-        ax2.xaxis.set_major_locator(hour_locator)
-        ax2.xaxis.set_minor_locator(minute_locator)
-        ax2.xaxis.set_major_formatter(mdates.DateFormatter('%H'))
-        # ax2.xaxis.set_minor_formatter(mdates.DateFormatter('%H:%M'))
-        return ax, ax2
-
-    return ax
-
-
-main()
