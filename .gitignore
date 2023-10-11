@@ -1,7 +1,6 @@
 __pycache__/
 .pylint.d/
 save_files/
-data/
 *.py[cod]
 *$py.class
 .installed.cfg
